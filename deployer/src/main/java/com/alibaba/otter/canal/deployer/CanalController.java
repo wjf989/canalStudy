@@ -104,6 +104,8 @@ public class CanalController {
         }
 
         // 准备canal server
+        //note: 核心在于embededCanalServer，如果有需要canalServerWithNetty，那就多包装一个（我们serverMode=mq是不需要这个netty的）
+        //note: embededCanalServer：类型为CanalServerWithEmbedded; canalServer：类型为CanalServerWithNetty
         ip = getProperty(properties, CanalConstants.CANAL_IP);
         registerIp = getProperty(properties, CanalConstants.CANAL_REGISTER_IP);
         port = Integer.valueOf(getProperty(properties, CanalConstants.CANAL_PORT, "11111"));
@@ -153,7 +155,15 @@ public class CanalController {
                 ServerRunningMonitor runningMonitor = new ServerRunningMonitor(serverData);
                 runningMonitor.setDestination(destination);
                 runningMonitor.setListener(new ServerRunningListener() {
-
+                    /**
+                     * note
+                     * 1.内部调用了embededCanalServer的start(destination)方法。
+                     * 这里很关键，说明每个destination对应的CanalInstance是通过embededCanalServer的start方法启动的，
+                     * 这样我们就能理解，为什么之前构造器中会把instanceGenerator设置到embededCanalServer中了。
+                     * embededCanalServer负责调用instanceGenerator生成CanalInstance实例，并负责其启动。
+                     *
+                     * 2.如果投递mq，还会直接调用canalMQStarter来启动一个destination
+                     */
                     public void processActiveEnter() {
                         try {
                             MDC.put(CanalConstants.MDC_DESTINATION, String.valueOf(destination));
@@ -165,7 +175,11 @@ public class CanalController {
                             MDC.remove(CanalConstants.MDC_DESTINATION);
                         }
                     }
-
+                    /**
+                     * note
+                     * 1.与开始顺序相反，如果有mqStarter，先停止mqStarter的destination
+                     * 2.停止embedeCanalServer的destination
+                     */
                     public void processActiveExit() {
                         try {
                             MDC.put(CanalConstants.MDC_DESTINATION, String.valueOf(destination));
@@ -177,7 +191,12 @@ public class CanalController {
                             MDC.remove(CanalConstants.MDC_DESTINATION);
                         }
                     }
-
+                    /**
+                     * note
+                     * 在Canalinstance启动之前，destination注册到ZK上,创建节点
+                     * 路径为：/otter/canal/destinations/{0}/cluster/{1}，其0会被destination替换，1会被ip:port替换。
+                     * 此方法会在processActiveEnter()之前被调用
+                     */
                     public void processStart() {
                         try {
                             if (zkclientx != null) {
@@ -204,7 +223,12 @@ public class CanalController {
                             MDC.remove(CanalConstants.MDC_DESTINATION);
                         }
                     }
-
+                    /**
+                     * note
+                     * 在Canalinstance停止前，把ZK上节点删除掉
+                     * 路径为：/otter/canal/destinations/{0}/cluster/{1}，其0会被destination替换，1会被ip:port替换。
+                     * 此方法会在processActiveExit()之前被调用
+                     */
                     public void processStop() {
                         try {
                             MDC.put(CanalConstants.MDC_DESTINATION, String.valueOf(destination));
@@ -513,14 +537,16 @@ public class CanalController {
                     runningMonitor.start();
                 }
             }
-
+            //note:为每个instance注册一个配置监视器
             if (autoScan) {
                 instanceConfigMonitors.get(config.getMode()).register(destination, defaultAction);
             }
         }
 
         if (autoScan) {
+            //note：启动线程定时去扫描配置
             instanceConfigMonitors.get(globalInstanceConfig.getMode()).start();
+            //note:这部分代码似乎没有用，目前只能是manager或者spring两种方式二选一
             for (InstanceConfigMonitor monitor : instanceConfigMonitors.values()) {
                 if (!monitor.isStart()) {
                     monitor.start();
